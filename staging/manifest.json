@@ -1,0 +1,22 @@
+{
+  "id": "/kasafon-web-preview/",
+  "name": "KasaFON",
+  "short_name": "KasaFON",
+  "description": "Kişisel finans, bütçe ve borç yönetimi",
+  "lang": "tr",
+  "start_url": "/kasafon-web-preview/",
+  "scope": "/kasafon-web-preview/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "theme_color": "#080E1A",
+  "background_color": "#080E1A",
+  "icons": [
+    {
+      "src": "/kasafon-web-preview/kasafon-app-icon.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
