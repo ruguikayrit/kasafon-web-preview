@@ -170,9 +170,60 @@ window.__kasafonPaint = async function (payload) {
 function __kasafonOcrRoot() {
   return String(document.baseURI || "").replace(/[^/]*$/, "");
 }
-window.__kasafonParseImage = async function (payload) {
-  try {
+function __kasafonReadBytes(url) {
+  return new Promise(function (resolve, reject) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", url, true);
+    xhr.responseType = "arraybuffer";
+    xhr.onload = function () {
+      if ((xhr.status === 0 || xhr.status === 200) && xhr.response) resolve(new Uint8Array(xhr.response));
+      else reject(new Error("SCREENSHOT"));
+    };
+    xhr.onerror = function () { reject(new Error("SCREENSHOT")); };
+    xhr.send();
+  });
+}
+function __kasafonNote(progress) {
+  var id = window.__kasafonOcrJob;
+  if (id) post({ type: "ocr-progress", id: id, progress: progress });
+}
+function __kasafonShotCanvas(img) {
+  var maxW = 720;
+  var scale = img.width > maxW ? maxW / img.width : 1;
+  var canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(img.width * scale));
+  canvas.height = Math.max(1, Math.round(img.height * scale));
+  var ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+function __kasafonLoadShot(payload) {
+  return new Promise(function (resolve, reject) {
+    var paint = function (src) {
+      var img = new Image();
+      img.onload = function () { resolve(img); };
+      img.onerror = function () { reject(new Error("SCREENSHOT")); };
+      img.src = src;
+    };
+    if (payload && payload.file) {
+      __kasafonReadBytes(__kasafonOcrRoot() + String(payload.file)).then(function (bytes) {
+        var type = bytes[0] === 137 ? "image/png" : "image/jpeg";
+        paint(URL.createObjectURL(new Blob([bytes], { type: type })));
+      }).catch(function () { reject(new Error("SCREENSHOT")); });
+      return;
+    }
+    var raw = String((payload && payload.base64) || "").replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "");
+    if (!raw) { reject(new Error("SCREENSHOT")); return; }
+    paint("data:image/jpeg;base64," + raw);
+  });
+}
+window.__kasafonEnsureOcr = function () {
+  if (window.__kasafonOcrReady) return window.__kasafonOcrReady;
+  window.__kasafonOcrReady = (async function () {
     var root = __kasafonOcrRoot();
+    __kasafonNote(0.08);
     if (!window.Tesseract) {
       await new Promise(function (resolve, reject) {
         var script = document.createElement("script");
@@ -183,18 +234,53 @@ window.__kasafonParseImage = async function (payload) {
       });
     }
     if (!window.__kasafonOcrWorker) {
-      window.__kasafonOcrWorker = await window.Tesseract.createWorker("tur+eng", 1, {
-        workerPath: root + "worker.min.js",
-        corePath: root + "tesseract-core.wasm.js",
-        langPath: root.replace(/\/$/, ""),
-        workerBlobURL: false,
-        gzip: true,
-        cacheMethod: "none",
+      __kasafonNote(0.16);
+      var coreText = await __kasafonReadBytes(root + "tesseract-core.wasm.js").then(function (bytes) {
+        return new TextDecoder("utf-8").decode(bytes);
       });
+      var workerText = await __kasafonReadBytes(root + "worker.min.js").then(function (bytes) {
+        return new TextDecoder("utf-8").decode(bytes);
+      });
+      var patched = workerText
+        .replace('a.map((function(t){return"string"==typeof t?t:t.data})).join("+")', 'a.map((function(t){return"string"==typeof t?t:(t.code||t.data)})).join("+")')
+        .replace("r.g.importScripts(h)", "0");
+      var workerUrl = URL.createObjectURL(new Blob([coreText, "\n;\n", patched], { type: "application/javascript" }));
+      var tur = await __kasafonReadBytes(root + "tur.traineddata.gz");
+      var eng = await __kasafonReadBytes(root + "eng.traineddata.gz");
+      __kasafonNote(0.28);
+      var created = window.Tesseract.createWorker([
+        { code: "tur", data: tur },
+        { code: "eng", data: eng },
+      ], 1, {
+        workerPath: workerUrl,
+        workerBlobURL: false,
+        cacheMethod: "none",
+        gzip: true,
+        logger: function (message) {
+          if (!message || typeof message.progress !== "number") return;
+          __kasafonNote(0.3 + message.progress * 0.62);
+        },
+      });
+      window.__kasafonOcrWorker = await Promise.race([
+        created,
+        new Promise(function (_, reject) { setTimeout(function () { reject(new Error("SCREENSHOT")); }, 30000); }),
+      ]);
       await window.__kasafonOcrWorker.setParameters({ tessedit_pageseg_mode: "6" });
     }
-    var raw = String((payload && payload.base64) || "").replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "");
-    var result = await window.__kasafonOcrWorker.recognize("data:image/jpeg;base64," + raw);
+  })();
+  return window.__kasafonOcrReady;
+};
+window.__kasafonParseImage = async function (payload) {
+  try {
+    window.__kasafonOcrJob = payload && payload.id;
+    await window.__kasafonEnsureOcr();
+    var img = await __kasafonLoadShot(payload);
+    var canvas = __kasafonShotCanvas(img);
+    __kasafonNote(0.36);
+    var result = await Promise.race([
+      window.__kasafonOcrWorker.recognize(canvas, {}, { text: true, blocks: true, hocr: false, tsv: false }),
+      new Promise(function (_, reject) { setTimeout(function () { reject(new Error("SCREENSHOT")); }, 50000); }),
+    ]);
     var words = (result && result.data && result.data.words) || [];
     var items = [];
     for (var i = 0; i < words.length; i++) {
@@ -213,7 +299,16 @@ window.__kasafonParseImage = async function (payload) {
     }
     post({ id: payload.id, pages: 1, items: items });
   } catch (error) {
-    post({ id: payload && payload.id, error: "SCREENSHOT" });
+    window.__kasafonOcrReady = null;
+    if (window.__kasafonOcrWorker && window.__kasafonOcrWorker.terminate) {
+      try { window.__kasafonOcrWorker.terminate(); } catch (e) {}
+    }
+    window.__kasafonOcrWorker = null;
+    post({
+      id: payload && payload.id,
+      error: "SCREENSHOT",
+      detail: String((error && error.message) || error || ""),
+    });
   }
 };
 
