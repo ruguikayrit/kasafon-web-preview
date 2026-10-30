@@ -167,6 +167,40 @@ window.__kasafonPaint = async function (payload) {
     post({ type: "paint-error", message: String((error && error.message) || error || "") });
   }
 };
+function __kasafonPrepareShot(dataUrl) {
+  return new Promise(function (resolve, reject) {
+    var img = new Image();
+    img.onload = function () {
+      var scale = img.width < 1400 ? 2 : 1;
+      var canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.floor(img.width * scale));
+      canvas.height = Math.max(1, Math.floor(img.height * scale));
+      var ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      var frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      var data = frame.data;
+      var sum = 0;
+      var seen = 0;
+      for (var i = 0; i < data.length; i += 16) {
+        sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        seen += 1;
+      }
+      var avg = sum / Math.max(1, seen);
+      var invert = avg < 128;
+      for (var j = 0; j < data.length; j += 4) {
+        var y = 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
+        if (invert) y = 255 - y;
+        var v = y < 150 ? 0 : 255;
+        data[j] = data[j + 1] = data[j + 2] = v;
+      }
+      ctx.putImageData(frame, 0, 0);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    img.onerror = function () { reject(new Error("SCREENSHOT")); };
+    img.src = dataUrl;
+  });
+}
 window.__kasafonParseImage = async function (payload) {
   try {
     if (!window.Tesseract) {
@@ -179,27 +213,45 @@ window.__kasafonParseImage = async function (payload) {
       });
     }
     var raw = String((payload && payload.base64) || "").replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "");
-    var result = await window.Tesseract.recognize("data:image/jpeg;base64," + raw, "tur+eng", {
+    var prepared = await __kasafonPrepareShot("data:image/jpeg;base64," + raw);
+    var result = await window.Tesseract.recognize(prepared, "tur+eng", {
       workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js",
       corePath: "https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/tesseract-core.wasm.js",
       langPath: "https://tessdata.projectnaptha.com/4.0.0_fast",
       workerBlobURL: false,
     });
-    var lines = (result && result.data && (result.data.lines || result.data.words)) || [];
+    var words = (result && result.data && result.data.words) || [];
     var items = [];
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i] || {};
-      var box = line.bbox || { x0: 0, y0: i * 18, x1: 10, y1: i * 18 + 14 };
-      var lineText = String(line.text || "").trim();
-      if (!lineText) continue;
+    for (var i = 0; i < words.length; i++) {
+      var word = words[i] || {};
+      var token = String(word.text || "").trim();
+      if (!token) continue;
+      var box = word.bbox || { x0: 0, y0: i * 18, x1: 10, y1: i * 18 + 14 };
       items.push({
-        text: lineText,
+        text: token,
         x: box.x0 || 0,
         y: box.y1 || (i * 18 + 14),
         width: Math.max(1, (box.x1 || 0) - (box.x0 || 0)),
         height: Math.max(1, (box.y1 || 0) - (box.y0 || 0)),
         page: 1,
       });
+    }
+    if (!items.length) {
+      var lines = (result && result.data && result.data.lines) || [];
+      for (var k = 0; k < lines.length; k++) {
+        var line = lines[k] || {};
+        var lineText = String(line.text || "").trim();
+        if (!lineText) continue;
+        var lineBox = line.bbox || { x0: 0, y0: k * 18, x1: 10, y1: k * 18 + 14 };
+        items.push({
+          text: lineText,
+          x: lineBox.x0 || 0,
+          y: lineBox.y1 || (k * 18 + 14),
+          width: Math.max(1, (lineBox.x1 || 0) - (lineBox.x0 || 0)),
+          height: Math.max(1, (lineBox.y1 || 0) - (lineBox.y0 || 0)),
+          page: 1,
+        });
+      }
     }
     post({ id: payload.id, pages: 1, items: items });
   } catch (error) {
